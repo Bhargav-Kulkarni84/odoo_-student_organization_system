@@ -4,6 +4,8 @@ import express from 'express'
 import test from './test.js'
 import usersRouter from './users.js'
 import eventsRouter from './events.js';
+import membershipsRouter from './membership.js';
+
 import authRouter from './auth/auth.js';
 
 const router = express.Router();
@@ -12,4 +14,6 @@ router.use("/api/v1",test);
 router.use('/api/v1/users', usersRouter);
 router.use('/api/v1/events', eventsRouter);
 router.use('/api/v1/auth', authRouter);
+router.use('/api/v1/memberships', membershipsRouter);
+
 export default router;

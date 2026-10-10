@@ -14,6 +14,8 @@ import merchandiseRouter from './marchandise.js';
 import announcementsRouter from './announcements.js';
 import tasksRouter from './tasks.js';
 import fundraisersRouter from './fundraiser.js';
+import expensesRouter from './expense.js';
+import financialReportsRouter from './financial-reports.js';
 
 const router = express.Router();
 
@@ -30,5 +32,7 @@ router.use('/api/v1/merchandise', merchandiseRouter);
 router.use('/api/v1/announcements', announcementsRouter);
 router.use('/api/v1/tasks', tasksRouter);
 router.use('/api/v1/fundraisers', fundraisersRouter);
+router.use('/api/v1/expenses', expensesRouter);
+router.use('/api/v1/financial-reports', financialReportsRouter);
 
 export default router;

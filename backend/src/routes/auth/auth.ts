@@ -139,7 +139,8 @@ router.post('/login', async (req, res) => {
             throw new Error('JWT_SECRET is not configured');
         }
 
-        const token = jwt.sign({email: user.email,roles,}, secret,{subject: String(user.id),expiresIn: '1h',});
+        // const token = jwt.sign({email: user.email,roles,}, secret,{subject: String(user.id),expiresIn: '1h',});
+        const token = jwt.sign({email: user.email,roles,}, secret,{subject: String(user.id)});
 
         return res.status(200).json({
             success: true,

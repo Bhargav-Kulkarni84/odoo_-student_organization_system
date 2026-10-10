@@ -24,7 +24,7 @@ async function request(path, options = {}) {
 
 const dateLabel = (value) => new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(new Date(value));
 const timeLabel = (value) => new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date(value));
-const emptyEvent = { title: '', description: '', location: '', starts_at: '', ends_at: '', capacity: 50 };
+const emptyEvent = { title: '', description: '', location: '', starts_at: '', ends_at: '', capacity: 50, ticket_name: 'General Admission', member_price: 0, non_member_price: 0, quantity_available: 50 };
 
 function App() {
   const [user, setUser] = useState(() => JSON.parse(localStorage.getItem('gather_user') || 'null'));
@@ -142,11 +142,35 @@ function App() {
         ...(event.club_id ? { club_id: Number(event.club_id) } : {}),
         ...(event.id && event.status ? { status: event.status } : {}),
       };
+
       const response = await request(path, { method: event.id ? 'PATCH' : 'POST', body: JSON.stringify(payload) });
+      const ticketPayload = {
+        name: event.ticket_name?.trim() || 'General Admission',
+        member_price: Number(event.member_price || 0),
+        non_member_price: Number(event.non_member_price || 0),
+        quantity_available: Number(event.quantity_available || event.capacity),
+      };
+      if (event.ticket_type_id) {
+        await request(`/events/${response.data.id}/ticket-types/${event.ticket_type_id}`, { method: 'PATCH', body: JSON.stringify(ticketPayload) });
+      } else {
+        await request(`/events/${response.data.id}/ticket-types`, { method: 'POST', body: JSON.stringify(ticketPayload) });
+      }
       setEvents((current) => event.id ? current.map((item) => item.id === event.id ? response.data : item) : [response.data, ...current]);
       await loadManagedEvents();
       setEventForm(null);
-      setToast(response.message || 'Event saved successfully.');
+      setToast(response.message || 'Event and ticket sales saved successfully.');
+    } catch (error) {
+      setToast(error.message);
+    }
+  };
+
+  const deleteEvent = async (event) => {
+    if (!window.confirm(`Delete "${event.title}" and its ticket types?`)) return;
+    try {
+      await request(`/events/${event.id}`, { method: 'DELETE' });
+      setManagedEvents((current) => current.filter((item) => item.id !== event.id));
+      setEvents((current) => current.filter((item) => item.id !== event.id));
+      setToast('Event deleted successfully.');
     } catch (error) {
       setToast(error.message);
     }
@@ -179,7 +203,7 @@ function App() {
         {page === 'clubs' && <ClubsPage clubs={clubs} myClubs={myClubs} user={user} onCreated={loadClubs} onToast={setToast} onLogin={() => setAuthMode('login')} onManage={() => navigate('manage')} />}
         {page === 'people' && <PeoplePage users={users} loading={loading} />}
         {page === 'profile' && user && <ProfilePage user={user} />}
-        {page === 'manage' && user && canManageEvents && <ManagePage events={managedEvents} clubs={manageableClubs} allowIndependent={isManager && !isAdmin} onNew={() => setEventForm({ ...emptyEvent, club_id: '' })} onEdit={setEventForm} />}
+        {page === 'manage' && user && canManageEvents && <ManagePage events={managedEvents} clubs={manageableClubs} allowIndependent={isManager && !isAdmin} onNew={() => setEventForm({ ...emptyEvent, club_id: '' })} onEdit={setEventForm} onDelete={deleteEvent} />}
         {page === 'approvals' && user && isAdmin && <ClubApprovals onChanged={loadClubs} onToast={setToast} />}
       </main>
       {authMode && <AuthModal mode={authMode} onClose={() => setAuthMode(null)} onSuccess={(nextUser, token, registered) => { if (registered && !token) { setAuthMode('login'); setToast('Registration successful. Log in to continue.'); return; } localStorage.setItem('gather_user', JSON.stringify(nextUser)); localStorage.setItem('gather_token', token); setUser(nextUser); setAuthMode(null); setToast(`Welcome, ${nextUser.name}.`); }} setMode={setAuthMode} />}
@@ -264,13 +288,35 @@ function PeoplePage({ users, loading }) { return <section className="workspace-s
 
 function ProfilePage({ user }) { return <section className="profile-card"><div className="profile-hero"><span className="profile-avatar">{user.name?.slice(0, 1).toUpperCase()}</span><div><span className="topbar-kicker">MEMBER PROFILE</span><h2>{user.name}</h2><p>{user.email}</p></div></div><div className="profile-details"><div><span>Account ID</span><strong>#{user.id}</strong></div><div><span>Roles</span><strong>{user.roles?.join(' · ') || 'STUDENT'}</strong></div><div><span>Status</span><strong className="active-text">Active member</strong></div></div></section>; }
 
-function ManagePage({ events, clubs, allowIndependent, onNew, onEdit }) { return <section className="workspace-section"><div className="manage-heading"><div><p>Create and maintain events for approved clubs.</p></div><button className="button" onClick={onNew} disabled={!clubs.length && !allowIndependent}>Create event ↗</button></div><div className="manage-table"><div className="table-head"><span>Event</span><span>Club / schedule</span><span>Status</span><span>Action</span></div>{events.map((event) => <div className="table-row" key={event.id}><strong>{event.title}</strong><span>{event.club_name || 'Independent event'}<small>{dateLabel(event.starts_at)} · {timeLabel(event.starts_at)}</small></span><span className="status-pill">{event.status}</span><button className="link-button" onClick={() => onEdit(event)}>Edit ↗</button></div>)}</div>{!clubs.length && !allowIndependent && <div className="state-message">No approved club is available for event creation.</div>}</section>; }
+function ManagePage({ events, clubs, allowIndependent, onNew, onEdit, onDelete }) { return <section className="workspace-section"><div className="manage-heading"><div><p>Create and maintain events and ticket sales for approved clubs.</p></div><button className="button" onClick={onNew} disabled={!clubs.length && !allowIndependent}>Create event ↗</button></div><div className="manage-table"><div className="table-head"><span>Event</span><span>Club / schedule</span><span>Status</span><span>Action</span></div>{events.map((event) => <div className="table-row" key={event.id}><strong>{event.title}</strong><span>{event.club_name || 'Independent event'}<small>{dateLabel(event.starts_at)} · {timeLabel(event.starts_at)}</small></span><span className="status-pill">{event.status}</span><span><button className="link-button" onClick={() => onEdit(event)}>Edit ↗</button><button className="link-button danger-link" onClick={() => onDelete(event)}>Delete</button></span></div>)}</div>{!clubs.length && !allowIndependent && <div className="state-message">No approved club is available for event creation.</div>}</section>; }
 
-function EventModal({ event, user, onClose, onLogin, onToast }) { return <div className="modal-backdrop" onClick={(click) => click.target === click.currentTarget && onClose()}><section className="event-detail-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}>×</button><span className="detail-eyebrow">EVENT DETAILS</span><h2>{event.title}</h2><div className="detail-meta"><span>{event.club_name || 'Independent event'}</span><span>{dateLabel(event.starts_at)}</span><span>{timeLabel(event.starts_at)}</span><span>{event.location || 'Location not provided'}</span><span>{event.capacity} spots</span></div><p id="event-detail-description">{event.description || 'No description was provided for this event.'}</p><div className="detail-actions"><span className="api-note">RSVP is not available in the current backend API.</span><button className="link-button" onClick={onClose}>Close</button></div></section></div>; }
+function EventModal({ event, user, onClose, onLogin, onToast }) { return <div className="modal-backdrop" onClick={(click) => click.target === click.currentTarget && onClose()}><section className="event-detail-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}>×</button><span className="detail-eyebrow">EVENT DETAILS</span><h2>{event.title}</h2><div className="detail-meta"><span>{event.club_name || 'Independent event'}</span><span>{dateLabel(event.starts_at)}</span><span>{timeLabel(event.starts_at)}</span><span>{event.location || 'Location not provided'}</span><span>{event.capacity} spots</span></div><p id="event-detail-description">{event.description || 'No description was provided for this event.'}</p><TicketBooking event={event} user={user} onLogin={onLogin} onToast={onToast} /><div className="detail-actions"><button className="link-button" onClick={onClose}>Close</button></div></section></div>; }
+
+function TicketBooking({ event, user, onLogin, onToast }) {
+  const [ticket, setTicket] = useState(null);
+  const [quantity, setQuantity] = useState(1);
+  useEffect(() => { request(`/events/${event.id}/ticket-types`).then((types) => setTicket(Array.isArray(types) ? types[0] : types.data?.[0] || null)).catch(() => setTicket(null)); }, [event.id]);
+  if (!ticket) return null;
+  const book = async () => {
+    if (!user) return onLogin();
+    try {
+      await request('/ticket-orders', { method: 'POST', body: JSON.stringify({ ticket_type_id: Number(ticket.id), quantity: Number(quantity) }) });
+      onToast('Tickets reserved successfully.');
+    } catch (error) { onToast(error.message); }
+  };
+  return <div className="ticket-booking"><div><strong>{ticket.name}</strong><small>Member: {ticket.member_price} · Non-member: {ticket.non_member_price}</small></div><div className="ticket-booking-actions"><input type="number" min="1" max="10" value={quantity} onChange={(input) => setQuantity(input.target.value)} /><button className="button button-small" onClick={book}>Book ticket ↗</button></div></div>;
+}
 
 function EventEditor({ event, clubs, allowIndependent, onChange, onClose, onSave }) {
   const update = (key, value) => onChange((current) => ({ ...current, [key]: value }));
-  return <div className="modal-backdrop"><section className="auth-modal editor-modal"><button className="modal-close" onClick={onClose}>×</button><span className="detail-eyebrow">{event.id ? 'EDIT EVENT' : 'NEW EVENT'}</span><h2>{event.id ? 'Shape the next gathering.' : 'Create a moment.'}</h2><form onSubmit={(submitEvent) => { submitEvent.preventDefault(); onSave(event); }}><label>Club<select value={event.club_id || ''} onChange={(input) => update('club_id', input.target.value ? Number(input.target.value) : null)} required={!event.id && !allowIndependent}><option value="">{allowIndependent ? 'Independent event' : 'Select an approved club'}</option>{clubs.map((club) => <option key={club.id} value={club.id}>{club.name}</option>)}</select></label><label>Title<input value={event.title} onChange={(input) => update('title', input.target.value)} required /></label><label>Description<textarea value={event.description || ''} onChange={(input) => update('description', input.target.value)} rows="3" /></label><label>Location<input value={event.location || ''} onChange={(input) => update('location', input.target.value)} /></label><div className="form-two-col"><label>Starts<input type="datetime-local" value={event.starts_at?.slice(0, 16) || ''} onChange={(input) => update('starts_at', input.target.value)} required /></label><label>Ends<input type="datetime-local" value={event.ends_at?.slice(0, 16) || ''} onChange={(input) => update('ends_at', input.target.value)} required /></label></div><label>Capacity<input type="number" min="1" value={event.capacity} onChange={(input) => update('capacity', input.target.value)} required /></label>{event.id && <label>Status<select value={event.status || 'published'} onChange={(input) => update('status', input.target.value)}><option value="draft">Draft</option><option value="published">Published</option><option value="cancelled">Cancelled</option><option value="completed">Completed</option></select></label>}<button className="button button-full">Save event ↗</button></form></section></div>;
+  useEffect(() => {
+    if (!event.id) return;
+    request(`/events/${event.id}/ticket-types`).then((types) => {
+      const ticket = Array.isArray(types) ? types[0] : types.data?.[0];
+      if (ticket) onChange((current) => ({ ...current, ticket_type_id: ticket.id, ticket_name: ticket.name, member_price: ticket.member_price, non_member_price: ticket.non_member_price, quantity_available: ticket.quantity_available }));
+    }).catch(() => {});
+  }, [event.id]);
+  return <div className="modal-backdrop"><section className="auth-modal editor-modal"><button className="modal-close" onClick={onClose}>×</button><span className="detail-eyebrow">{event.id ? 'EDIT EVENT' : 'NEW EVENT'}</span><h2>{event.id ? 'Shape the next gathering.' : 'Create a moment.'}</h2><form onSubmit={(submitEvent) => { submitEvent.preventDefault(); onSave(event); }}><label>Club<select value={event.club_id || ''} onChange={(input) => update('club_id', input.target.value ? Number(input.target.value) : null)} required={!event.id && !allowIndependent}><option value="">{allowIndependent ? 'Independent event' : 'Select an approved club'}</option>{clubs.map((club) => <option key={club.id} value={club.id}>{club.name}</option>)}</select></label><label>Title<input value={event.title} onChange={(input) => update('title', input.target.value)} required /></label><label>Description<textarea value={event.description || ''} onChange={(input) => update('description', input.target.value)} rows="3" /></label><label>Location<input value={event.location || ''} onChange={(input) => update('location', input.target.value)} /></label><div className="form-two-col"><label>Starts<input type="datetime-local" value={event.starts_at?.slice(0, 16) || ''} onChange={(input) => update('starts_at', input.target.value)} required /></label><label>Ends<input type="datetime-local" value={event.ends_at?.slice(0, 16) || ''} onChange={(input) => update('ends_at', input.target.value)} required /></label></div><label>Capacity<input type="number" min="1" value={event.capacity} onChange={(input) => update('capacity', input.target.value)} required /></label><div className="form-two-col"><label>Ticket name<input value={event.ticket_name || ''} onChange={(input) => update('ticket_name', input.target.value)} required /></label><label>Tickets available<input type="number" min="0" value={event.quantity_available ?? event.capacity} onChange={(input) => update('quantity_available', input.target.value)} required /></label></div><div className="form-two-col"><label>Member price<input type="number" min="0" step="0.01" value={event.member_price ?? 0} onChange={(input) => update('member_price', input.target.value)} required /></label><label>Non-member price<input type="number" min="0" step="0.01" value={event.non_member_price ?? 0} onChange={(input) => update('non_member_price', input.target.value)} required /></label></div>{event.id && <label>Status<select value={event.status || 'published'} onChange={(input) => update('status', input.target.value)}><option value="draft">Draft</option><option value="published">Published</option><option value="cancelled">Cancelled</option><option value="completed">Completed</option></select></label>}<button className="button button-full">Save event and tickets ↗</button></form></section></div>;
 }
 
 function AuthModal({ mode, onClose, onSuccess, setMode }) {

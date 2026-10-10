@@ -12,4 +12,5 @@ const pool = isDatabaseConfigured
       })
     : null;
 
-export default pool;
+// Database-only route modules guard availability at runtime before querying.
+export default pool as pg.Pool;

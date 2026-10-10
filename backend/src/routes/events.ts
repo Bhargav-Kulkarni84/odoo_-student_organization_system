@@ -371,4 +371,34 @@ router.patch('/:id', authenticate, canManageClubEvents, async (req, res) => {
     }
 });
 
+router.delete('/:id', authenticate, async (req, res) => {
+    const id = req.params.id;
+    if (typeof id !== 'string' || !/^[1-9]\d*$/.test(id)) {
+        return res.status(400).json({ success: false, message: 'Invalid event ID' });
+    }
+    if (!useDatabase()) {
+        return res.status(503).json({ success: false, message: 'Event deletion requires the database' });
+    }
+    try {
+        const event = await pool!.query('SELECT club_id FROM events WHERE id = $1', [id]);
+        if (!event.rowCount) return res.status(404).json({ success: false, message: 'Event not found' });
+        const clubId = event.rows[0].club_id;
+        const isGlobalManager = req.user!.roles.some((role) => ['ADMIN', 'TEAM_LEAD'].includes(role));
+        if (!isGlobalManager) {
+            const membership = await pool!.query(
+                `SELECT 1 FROM club_members cm JOIN clubs c ON c.id = cm.club_id
+                 WHERE cm.club_id = $1 AND cm.user_id = $2
+                   AND cm.role IN ('lead', 'admin') AND c.status = 'approved'`,
+                [clubId, req.user!.id],
+            );
+            if (!membership.rowCount) return res.status(403).json({ success: false, message: 'You cannot delete this event' });
+        }
+        await pool!.query('DELETE FROM events WHERE id = $1', [id]);
+        return res.json({ success: true, message: 'Event deleted successfully' });
+    } catch (error) {
+        console.error('Failed to delete event:', error);
+        return res.status(500).json({ success: false, message: 'Failed to delete event' });
+    }
+});
+
 export default router;

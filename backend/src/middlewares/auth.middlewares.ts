@@ -15,6 +15,7 @@ declare global {
     }
 }
 
+//Check the authentication
 export function authenticate(req: Request,res: Response,next: NextFunction) {
 
     const authHeader = req.headers.authorization;
@@ -66,6 +67,7 @@ export function authenticate(req: Request,res: Response,next: NextFunction) {
     }
 }
 
+// Check the user roles authorization
 export function authorize(...allowedRoles: string[]) {
     return (req: Request, res: Response, next: NextFunction) => {
         if (!req.user) {

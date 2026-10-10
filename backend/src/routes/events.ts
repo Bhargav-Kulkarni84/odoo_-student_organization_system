@@ -9,7 +9,7 @@ import { authenticate, authorize } from '../middlewares/auth.middlewares.js';
 
 const router = express.Router();
 
-// events layout
+// events layout , only admin eligible to create an event
 router.post('/', authenticate, authorize('ADMIN'),async (req, res) => {
     
     const validation = createEventSchema.safeParse(req.body);
@@ -58,7 +58,7 @@ router.post('/', authenticate, authorize('ADMIN'),async (req, res) => {
             data: result.rows[0],
         });
     } 
-    
+
     catch (error) {
         console.error('Failed to create event:', error);
 

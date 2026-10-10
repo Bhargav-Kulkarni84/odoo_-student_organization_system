@@ -9,7 +9,6 @@ import { authenticate, authorize } from '../middlewares/auth.middlewares.js';
 
 const router = express.Router();
 
-
 const canManageEvents = authorize('ADMIN', 'TEAM_LEAD');
 
 // GET /api/v1/events?upcoming=true

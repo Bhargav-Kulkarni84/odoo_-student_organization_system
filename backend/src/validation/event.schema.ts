@@ -6,7 +6,8 @@ const eventFields = {
     location: z.string().trim().max(255).nullable().optional(),
     starts_at: z.iso.datetime(),
     ends_at: z.iso.datetime(),
-    capacity: z.number().int().positive(),
+    capacity: z.coerce.number().int().positive(),
+    club_id: z.preprocess((value) => value === '' || value === undefined ? undefined : value === null ? null : Number(value), z.number().int().positive().nullable().optional()),
     status: z.enum(['draft', 'published', 'cancelled', 'completed']),
 };
 
@@ -17,6 +18,7 @@ export const createEventSchema = z.object({
     starts_at: eventFields.starts_at,
     ends_at: eventFields.ends_at,
     capacity: eventFields.capacity,
+    club_id: eventFields.club_id,
 }).refine(
     (data) => new Date(data.ends_at) > new Date(data.starts_at),
     {
@@ -33,6 +35,7 @@ export const updateEventSchema = z.object({
     ends_at: eventFields.ends_at.optional(),
     capacity: eventFields.capacity.optional(),
     status: eventFields.status.optional(),
+    club_id: eventFields.club_id,
 }).refine(
     (data) => Object.keys(data).length > 0,
     { message: 'Provide at least one field to update' }

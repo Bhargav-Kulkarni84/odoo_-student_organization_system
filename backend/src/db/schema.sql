@@ -248,8 +248,7 @@ CREATE INDEX idx_announcements_status_published ON announcements(status, publish
 
 -- Starter roles
 INSERT INTO roles (name) VALUES
-    ('ADMIN'),('STUDENT'),('MEMBER'), ('TREASURER'), ('VOLUNTEER') 
+    ('ADMIN'),('TEAM_LEAD'),('STUDENT'),('MEMBER'), ('TREASURER'), ('VOLUNTEER')
 ON CONFLICT (name) DO NOTHING;
 
 COMMIT;
-

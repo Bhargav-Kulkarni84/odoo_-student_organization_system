@@ -1,31 +1,66 @@
 import express from 'express';
-import pool from '../db/pool.js';
+import pool, { isDatabaseConfigured } from '../db/pool.js';
+import {
+    createFallbackEvent,
+    getFallbackEventById,
+    isDbUnavailableError,
+    listFallbackEvents,
+    updateFallbackEvent,
+} from '../db/fallbackStore.js';
 
 // Validation
-import { createEventSchema,updateEventSchema } from '../validation/event.schema.js';
+import { createEventSchema, updateEventSchema } from '../validation/event.schema.js';
 
 // Authentication
-import { authenticate, authorize } from '../middlewares/auth.middlewares.js';
+import { authenticate } from '../middlewares/auth.middlewares.js';
 
 const router = express.Router();
+const canManageClubEvents = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (!req.user) return res.status(401).json({ success: false, message: 'Authentication required' });
+    if (req.user.roles.some((role) => ['ADMIN', 'TEAM_LEAD'].includes(role))) return next();
+    if (!useDatabase()) return res.status(503).json({ success: false, message: 'Club event management requires the database' });
+    let clubId = req.body?.club_id;
+    try {
+        if (req.params.id && !Number.isInteger(clubId)) {
+            const current = await pool!.query('SELECT club_id FROM events WHERE id = $1', [req.params.id]);
+            clubId = current.rows[0]?.club_id;
+        }
+        if (!Number.isInteger(clubId) || clubId < 1) return res.status(403).json({ success: false, message: 'An approved club is required' });
+        const result = await pool!.query(
+            `SELECT 1 FROM club_members cm JOIN clubs c ON c.id = cm.club_id
+             WHERE cm.club_id = $1 AND cm.user_id = $2 AND cm.role IN ('lead', 'admin')
+               AND c.status = 'approved'`,
+            [clubId, req.user.id],
+        );
+        if (!result.rowCount) return res.status(403).json({ success: false, message: 'You cannot manage events for this club' });
+        return next();
+    } catch (error) {
+        console.error('Failed to authorize club event:', error);
+        return res.status(503).json({ success: false, message: 'Club event service is unavailable' });
+    }
+};
 
-
-const canManageEvents = authorize('ADMIN', 'TEAM_LEAD');
+const useDatabase = () => isDatabaseConfigured && Boolean(pool);
 
 // GET /api/v1/events?upcoming=true
-// Public listing shows published events only.
 router.get('/', async (req, res) => {
     const upcoming = req.query.upcoming === 'true';
 
+    if (!useDatabase()) {
+        const data = listFallbackEvents(upcoming);
+        return res.status(200).json({ success: true, count: data.length, data });
+    }
+
     try {
-        const result = await pool.query(
-            `SELECT id, title, description, location, starts_at,
-                    ends_at, capacity, status, organizer_id, created_at
-             FROM events
-             WHERE status = 'published'
-               AND ($1::boolean = false OR starts_at >= NOW())
-             ORDER BY starts_at ASC`,
-            [upcoming]
+        const result = await pool!.query(
+            `            SELECT e.id, e.title, e.description, e.location, e.starts_at,
+                   e.ends_at, e.capacity, e.status, e.organizer_id, e.club_id,
+                   e.created_at, c.name AS club_name
+            FROM events e LEFT JOIN clubs c ON c.id = e.club_id
+             WHERE e.status = 'published'
+               AND ($1::boolean = false OR e.starts_at >= NOW())
+             ORDER BY e.starts_at ASC`,
+            [upcoming],
         );
 
         return res.status(200).json({
@@ -33,8 +68,12 @@ router.get('/', async (req, res) => {
             count: result.rows.length,
             data: result.rows,
         });
-    } 
-    catch (error) {
+    } catch (error) {
+        if (isDbUnavailableError(error)) {
+            const data = listFallbackEvents(upcoming);
+            return res.status(200).json({ success: true, count: data.length, data });
+        }
+
         console.error('Failed to list events:', error);
         return res.status(500).json({
             success: false,
@@ -43,8 +82,37 @@ router.get('/', async (req, res) => {
     }
 });
 
+// GET /api/v1/events/managed
+// Returns drafts and published events the current user is allowed to manage.
+router.get('/managed', authenticate, async (req, res) => {
+    if (!useDatabase()) {
+        return res.status(503).json({ success: false, message: 'Managed events require the database' });
+    }
+
+    try {
+        const hasGlobalAccess = req.user!.roles.some((role) => ['ADMIN', 'TEAM_LEAD'].includes(role));
+        const result = await pool!.query(
+            `SELECT e.id, e.title, e.description, e.location, e.starts_at,
+                    e.ends_at, e.capacity, e.status, e.organizer_id, e.club_id,
+                    e.created_at, c.name AS club_name
+             FROM events e
+             LEFT JOIN clubs c ON c.id = e.club_id
+             ${hasGlobalAccess
+                ? ''
+                : `JOIN club_members cm ON cm.club_id = e.club_id
+                   WHERE cm.user_id = $1 AND cm.role IN ('lead', 'admin')
+                     AND c.status = 'approved'`}
+             ${hasGlobalAccess ? 'ORDER BY e.starts_at ASC' : 'ORDER BY e.starts_at ASC'}`,
+            hasGlobalAccess ? [] : [req.user!.id],
+        );
+        return res.status(200).json({ success: true, count: result.rows.length, data: result.rows });
+    } catch (error) {
+        console.error('Failed to list managed events:', error);
+        return res.status(500).json({ success: false, message: 'Failed to retrieve managed events' });
+    }
+});
+
 // GET /api/v1/events/:id
-// Get event from event id.
 router.get('/:id', async (req, res) => {
     const id = req.params.id;
 
@@ -55,13 +123,22 @@ router.get('/:id', async (req, res) => {
         });
     }
 
+    if (!useDatabase()) {
+        const event = getFallbackEventById(Number(id));
+        if (!event) {
+            return res.status(404).json({ success: false, message: 'Event not found' });
+        }
+        return res.status(200).json({ success: true, data: event });
+    }
+
     try {
-        const result = await pool.query(
-            `SELECT id, title, description, location, starts_at,
-                    ends_at, capacity, status, organizer_id, created_at
-             FROM events
-             WHERE id = $1 AND status = 'published'`,
-            [id]
+        const result = await pool!.query(
+            `            SELECT e.id, e.title, e.description, e.location, e.starts_at,
+                   e.ends_at, e.capacity, e.status, e.organizer_id, e.club_id,
+                   e.created_at, c.name AS club_name
+            FROM events e LEFT JOIN clubs c ON c.id = e.club_id
+             WHERE e.id = $1 AND e.status = 'published'`,
+            [id],
         );
 
         if (result.rows.length === 0) {
@@ -75,8 +152,15 @@ router.get('/:id', async (req, res) => {
             success: true,
             data: result.rows[0],
         });
-    } 
-    catch (error) {
+    } catch (error) {
+        if (isDbUnavailableError(error)) {
+            const event = getFallbackEventById(Number(id));
+            if (!event) {
+                return res.status(404).json({ success: false, message: 'Event not found' });
+            }
+            return res.status(200).json({ success: true, data: event });
+        }
+
         console.error('Failed to fetch event:', error);
         return res.status(500).json({
             success: false,
@@ -86,8 +170,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // POST /api/v1/events
-//Allow creation of new event only to TeamLead and Manager
-router.post('/', authenticate, canManageEvents, async (req, res) => {
+router.post('/', authenticate, canManageClubEvents, async (req, res) => {
     const validation = createEventSchema.safeParse(req.body);
 
     if (!validation.success) {
@@ -98,14 +181,32 @@ router.post('/', authenticate, canManageEvents, async (req, res) => {
         });
     }
 
-    const {title, description, location, starts_at, ends_at, capacity} = validation.data;
+    const { title, description, location, starts_at, ends_at, capacity, club_id } = validation.data;
+
+    if (!useDatabase()) {
+        const event = createFallbackEvent({
+            title,
+            description: description ?? null,
+            location: location ?? null,
+            starts_at,
+            ends_at,
+            capacity,
+            organizer_id: Number(req.user?.id ?? 1),
+        });
+
+        return res.status(201).json({
+            success: true,
+            message: 'Event created successfully',
+            data: event,
+        });
+    }
 
     try {
-        const result = await pool.query(
+        const result = await pool!.query(
             `INSERT INTO events
                 (title, description, location, starts_at, ends_at,
-                 capacity, organizer_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 capacity, organizer_id, club_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              RETURNING *`,
             [
                 title,
@@ -115,7 +216,8 @@ router.post('/', authenticate, canManageEvents, async (req, res) => {
                 ends_at,
                 capacity,
                 req.user!.id,
-            ]
+                club_id ?? null,
+            ],
         );
 
         return res.status(201).json({
@@ -123,8 +225,25 @@ router.post('/', authenticate, canManageEvents, async (req, res) => {
             message: 'Event created successfully',
             data: result.rows[0],
         });
-    } 
-    catch (error) {
+    } catch (error) {
+        if (isDbUnavailableError(error)) {
+            const event = createFallbackEvent({
+                title,
+                description: description ?? null,
+                location: location ?? null,
+                starts_at,
+                ends_at,
+                capacity,
+                organizer_id: Number(req.user?.id ?? 1),
+            });
+
+            return res.status(201).json({
+                success: true,
+                message: 'Event created successfully',
+                data: event,
+            });
+        }
+
         console.error('Failed to create event:', error);
         return res.status(500).json({
             success: false,
@@ -134,91 +253,122 @@ router.post('/', authenticate, canManageEvents, async (req, res) => {
 });
 
 // PATCH /api/v1/events/:id
-//Update the previously scheduled event
-router.patch('/:id',authenticate,canManageEvents,async (req, res) => {
-        
+router.patch('/:id', authenticate, canManageClubEvents, async (req, res) => {
     const id = req.params.id;
-        
-        if (!id){
+
+    if (!id) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid event ID',
+        });
+    }
+
+    if (!id || typeof id !== 'string') {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid event ID format',
+        });
+    }
+
+    const validation = updateEventSchema.safeParse(req.body);
+
+    if (!validation.success) {
+        return res.status(400).json({
+            success: false,
+            message: 'Validation failed',
+            errors: validation.error.issues,
+        });
+    }
+
+    if (!useDatabase()) {
+        const current = getFallbackEventById(Number(id));
+        if (!current) {
+            return res.status(404).json({ success: false, message: 'Event not found' });
+        }
+
+        const updates = validation.data;
+        const startsAt = updates.starts_at ?? current.starts_at;
+        const endsAt = updates.ends_at ?? current.ends_at;
+
+        if (new Date(endsAt) <= new Date(startsAt)) {
             return res.status(400).json({
                 success: false,
-                message: 'Invalid event ID',
+                message: 'End time must be after start time',
             });
         }
 
-        // type check to make sure it's a single string, not an array
-        if (!id || typeof id !== 'string') {
-            return res.status(400).json({
+        const updated = updateFallbackEvent(Number(id), { ...updates, starts_at: startsAt, ends_at: endsAt });
+        return res.status(200).json({
+            success: true,
+            message: 'Event updated successfully',
+            data: updated,
+        });
+    }
+
+    try {
+        const currentResult = await pool!.query('SELECT * FROM events WHERE id = $1', [id]);
+
+        if (currentResult.rows.length === 0) {
+            return res.status(404).json({
                 success: false,
-                message: 'Invalid event ID format',
+                message: 'Event not found',
             });
         }
 
-        const validation = updateEventSchema.safeParse(req.body);
+        const current = currentResult.rows[0];
+        const updates = validation.data;
 
-        if (!validation.success) {
+        const startsAt = updates.starts_at ?? current.starts_at;
+        const endsAt = updates.ends_at ?? current.ends_at;
+
+        if (new Date(endsAt) <= new Date(startsAt)) {
             return res.status(400).json({
                 success: false,
-                message: 'Validation failed',
-                errors: validation.error.issues,
+                message: 'End time must be after start time',
             });
         }
 
-        try {
-            const currentResult = await pool.query(`SELECT * FROM events WHERE id = $1`,[id]);
+        const fields = Object.keys(updates) as Array<keyof typeof updates>;
+        const values = fields.map((field) => updates[field]);
+        const assignments = fields.map((field, index) => `${field} = $${index + 1}`);
 
-            if (currentResult.rows.length === 0) {
-                return res.status(404).json({
-                    success: false,
-                    message: 'Event not found',
-                });
-            }
+        values.push(id);
 
-            const current = currentResult.rows[0];
-            const updates = validation.data;
-
-            const startsAt = updates.starts_at ?? current.starts_at;
-            const endsAt = updates.ends_at ?? current.ends_at;
-
-            if (new Date(endsAt) <= new Date(startsAt)) {
-                return res.status(400).json({
-                    success: false,
-                    message: 'End time must be after start time',
-                });
-            }
-
-            const fields = Object.keys(updates) as Array<
-                keyof typeof updates
-            >;
-
-            const values = fields.map((field) => updates[field]);
-            const assignments = fields.map(
-                (field, index) => `${field} = $${index + 1}`
-            );
-
-            values.push(id);
-
-            const result = await pool.query(
-                `UPDATE events
+        const result = await pool!.query(
+            `UPDATE events
                  SET ${assignments.join(', ')}
                  WHERE id = $${values.length}
                  RETURNING *`,
-                values
-            );
+            values,
+        );
 
-            return res.status(200).json({
-                success: true,
-                message: 'Event updated successfully',
-                data: result.rows[0],
-            });
-        } catch (error) {
-            console.error('Failed to update event:', error);
-            return res.status(500).json({
-                success: false,
-                message: 'Failed to update event',
-            });
+        return res.status(200).json({
+            success: true,
+            message: 'Event updated successfully',
+            data: result.rows[0],
+        });
+    } catch (error) {
+        if (isDbUnavailableError(error)) {
+            const current = getFallbackEventById(Number(id));
+            if (!current) {
+                return res.status(404).json({ success: false, message: 'Event not found' });
+            }
+            const updates = validation.data;
+            const startsAt = updates.starts_at ?? current.starts_at;
+            const endsAt = updates.ends_at ?? current.ends_at;
+            if (new Date(endsAt) <= new Date(startsAt)) {
+                return res.status(400).json({ success: false, message: 'End time must be after start time' });
+            }
+            const updated = updateFallbackEvent(Number(id), { ...updates, starts_at: startsAt, ends_at: endsAt });
+            return res.status(200).json({ success: true, message: 'Event updated successfully', data: updated });
         }
+
+        console.error('Failed to update event:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to update event',
+        });
     }
-);
+});
 
 export default router;

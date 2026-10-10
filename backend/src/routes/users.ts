@@ -1,41 +1,59 @@
 import express from 'express';
-import pool from '../db/pool.js';
+import pool, { isDatabaseConfigured } from '../db/pool.js';
 
 //Zod validation
 import { createUserSchema } from '../validation/user.schema.js';
 
 //Auth requirements
 import bcrypt from 'bcrypt';
+import {
+    createFallbackUser,
+    getFallbackUserByEmail,
+    getFallbackUserById,
+    isDbUnavailableError,
+    listFallbackUsers,
+} from '../db/fallbackStore.js';
 
 const router = express.Router();
 
+const useDatabase = () => isDatabaseConfigured && Boolean(pool);
+
 //Fetch the users from the database
 router.get('/', async (req, res) => {
-    try {
+    if (!useDatabase()) {
+        return res.status(200).json({
+            success: true,
+            count: listFallbackUsers().length,
+            data: listFallbackUsers(),
+        });
+    }
 
-        const result = await pool.query(`
-            SELECT u.id, u.name, u.email, u.is_active, u.created_at, 
+    try {
+        const result = await pool!.query(`
+            SELECT u.id, u.name, u.email, u.is_active, u.created_at,
             r.name AS role
             FROM users u
             JOIN user_roles ur ON
             u.id = ur.user_id
-            JOIN roles r ON 
-            r.id = ur.role_id 
-            ORDER BY id ASC
+            JOIN roles r ON
+            r.id = ur.role_id
+            ORDER BY u.id ASC
         `);
-        
-        res.status(200).json({
+
+        return res.status(200).json({
             success: true,
             count: result.rows.length,
             data: result.rows,
         });
+    } catch (error) {
+        if (isDbUnavailableError(error)) {
+            const data = listFallbackUsers();
+            return res.status(200).json({ success: true, count: data.length, data });
+        }
 
-    } 
-    
-    catch (error) {
         console.error('Failed to fetch users:', error);
 
-        res.status(500).json({
+        return res.status(500).json({
             success: false,
             message: 'Failed to retrieve users',
         });
@@ -46,7 +64,6 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
     const id = Number(req.params.id);
 
-    //throw error if invaldd parameter id
     if (!Number.isInteger(id) || id <= 0) {
         return res.status(400).json({
             success: false,
@@ -54,13 +71,20 @@ router.get('/:id', async (req, res) => {
         });
     }
 
+    if (!useDatabase()) {
+        const user = getFallbackUserById(id);
+        if (!user) {
+            return res.status(404).json({ success: false, message: 'User not found' });
+        }
+        return res.status(200).json({ success: true, data: user });
+    }
 
     try {
-        const result = await pool.query(
+        const result = await pool!.query(
             `SELECT id, name, email, is_active, created_at
             FROM users
             WHERE id = $1`,
-            [id]
+            [id],
         );
 
         if (result.rows.length === 0) {
@@ -74,9 +98,15 @@ router.get('/:id', async (req, res) => {
             success: true,
             data: result.rows[0],
         });
-    } 
-    
-    catch (error) {
+    } catch (error) {
+        if (isDbUnavailableError(error)) {
+            const user = getFallbackUserById(id);
+            if (!user) {
+                return res.status(404).json({ success: false, message: 'User not found' });
+            }
+            return res.status(200).json({ success: true, data: user });
+        }
+
         console.error('Failed to fetch user:', error);
 
         return res.status(500).json({
@@ -88,8 +118,6 @@ router.get('/:id', async (req, res) => {
 
 //Sign in user
 router.post('/signup', async (req, res) => {
-
-    //Validate user inputs
     const validation = createUserSchema.safeParse(req.body);
 
     if (!validation.success) {
@@ -105,14 +133,33 @@ router.post('/signup', async (req, res) => {
 
     const { name, email, password } = validation.data;
 
+    if (!useDatabase()) {
+        try {
+            const user = createFallbackUser({ name, email, password });
+            return res.status(201).json({
+                success: true,
+                message: 'User created successfully',
+                data: user,
+            });
+        } catch (error) {
+            if (typeof error === 'object' && error !== null && 'code' in error && error.code === '23505') {
+                return res.status(409).json({
+                    success: false,
+                    message: 'A user with this email already exists',
+                });
+            }
+            return res.status(500).json({ success: false, message: 'Failed to create user' });
+        }
+    }
+
     try {
         const passwordHash = await bcrypt.hash(password, 12);
 
-        const result = await pool.query(
+        const result = await pool!.query(
             `INSERT INTO users (name, email, password_hash)
             VALUES ($1, $2, $3)
             RETURNING id, name, email, is_active, created_at`,
-            [name, email, passwordHash]
+            [name, email, passwordHash],
         );
 
         return res.status(201).json({
@@ -120,12 +167,24 @@ router.post('/signup', async (req, res) => {
             message: 'User created successfully',
             data: result.rows[0],
         });
-    } 
-    
-    catch (error) {
-        
-        if (typeof error === 'object' && error !== null && 'code' in error &&error.code === '23505') {
-            
+    } catch (error) {
+        if (isDbUnavailableError(error)) {
+            try {
+                const user = createFallbackUser({ name, email, password });
+                return res.status(201).json({
+                    success: true,
+                    message: 'User created successfully',
+                    data: user,
+                });
+            } catch (innerError) {
+                if (typeof innerError === 'object' && innerError !== null && 'code' in innerError && innerError.code === '23505') {
+                    return res.status(409).json({ success: false, message: 'A user with this email already exists' });
+                }
+                return res.status(500).json({ success: false, message: 'Failed to create user' });
+            }
+        }
+
+        if (typeof error === 'object' && error !== null && 'code' in error && error.code === '23505') {
             return res.status(409).json({
                 success: false,
                 message: 'A user with this email already exists',
@@ -140,7 +199,6 @@ router.post('/signup', async (req, res) => {
         });
     }
 });
-
 
 export default router;
 

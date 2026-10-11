@@ -20,7 +20,7 @@ router.get('/', async (req, res) => {
 
     const result = await pool.query(
       `SELECT f.id, f.name, f.description, f.starts_at, f.ends_at,
-              f.target_amount, f.status, f.created_at,
+              f.target_amount, f.status,
               COALESCE(
                 SUM(ft.amount) FILTER (WHERE ft.direction = 'inflow'), 0
               ) AS total_raised
@@ -31,7 +31,7 @@ router.get('/', async (req, res) => {
         AND ft.transaction_type = 'fundraiser_income'
        WHERE ($1::text IS NULL OR f.status = $1)
        GROUP BY f.id
-       ORDER BY f.created_at DESC`,
+       ORDER BY f.id DESC`,
       [status === undefined ? null : String(status)],
     );
 
@@ -47,7 +47,7 @@ router.get('/:id', async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT f.id, f.name, f.description, f.starts_at, f.ends_at,
-              f.target_amount, f.status, f.created_at,
+              f.target_amount, f.status,
               COALESCE(
                 SUM(ft.amount) FILTER (WHERE ft.direction = 'inflow'), 0
               ) AS total_raised

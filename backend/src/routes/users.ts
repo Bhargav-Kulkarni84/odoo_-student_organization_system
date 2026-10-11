@@ -31,12 +31,13 @@ router.get('/', async (req, res) => {
     try {
         const result = await pool!.query(`
             SELECT u.id, u.name, u.email, u.is_active, u.created_at,
-            r.name AS role
+            COALESCE(STRING_AGG(DISTINCT r.name, ', ' ORDER BY r.name), 'STUDENT') AS role
             FROM users u
-            JOIN user_roles ur ON
+            LEFT JOIN user_roles ur ON
             u.id = ur.user_id
-            JOIN roles r ON
+            LEFT JOIN roles r ON
             r.id = ur.role_id
+            GROUP BY u.id, u.name, u.email, u.is_active, u.created_at
             ORDER BY u.id ASC
         `);
 

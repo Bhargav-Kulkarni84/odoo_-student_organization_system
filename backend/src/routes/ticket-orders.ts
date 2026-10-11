@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import pool from '../db/pool.js';
 import { authenticate } from '../middlewares/auth.middlewares.js'
 import { bookTicketsSchema } from '../validation/ticket.schema.js';
+import { createReceiptDownloadUrl, uploadReceipt } from '../services/supabase-storage.js';
 
 const router = Router();
 
@@ -23,12 +24,13 @@ router.post('/', authenticate, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Find the event, then lock it. All bookings for the same event
-    // serialize here, protecting the event's overall capacity.
+    // Find the event associated with the ticket type.
     const eventResult = await client.query(
-      `SELECT e.id, e.capacity, e.status
+      `SELECT e.id, e.status, e.title, e.starts_at, e.ends_at, e.location,
+              c.name AS club_name
        FROM events e
        JOIN ticket_types tt ON tt.event_id = e.id
+       LEFT JOIN clubs c ON c.id = e.club_id
        WHERE tt.id = $1`,
       [ticket_type_id]
     );
@@ -40,15 +42,7 @@ router.post('/', authenticate, async (req, res) => {
 
     const eventId = eventResult.rows[0].id;
 
-    const lockedEvent = await client.query(
-      `SELECT id, capacity, status
-       FROM events
-       WHERE id = $1
-       FOR UPDATE`,
-      [eventId]
-    );
-
-    if (lockedEvent.rows[0].status !== 'published') {
+    if (eventResult.rows[0].status !== 'published') {
       await client.query('ROLLBACK');
       return res.status(400).json({ message: 'Event is not open for booking' });
     }
@@ -77,17 +71,6 @@ router.post('/', authenticate, async (req, res) => {
       return res.status(400).json({ message: 'Ticket sales are not open' });
     }
 
-    // Count pending and paid tickets. Pending orders reserve capacity.
-    const eventCount = await client.query(
-      `SELECT COUNT(*)::int AS sold
-       FROM tickets t
-       JOIN ticket_orders o ON o.id = t.ticket_order_id
-       JOIN ticket_types tt ON tt.id = t.ticket_type_id
-       WHERE tt.event_id = $1
-         AND o.status IN ('pending', 'paid')`,
-      [eventId]
-    );
-
     const typeCount = await client.query(
       `SELECT COUNT(*)::int AS sold
        FROM tickets t
@@ -96,11 +79,6 @@ router.post('/', authenticate, async (req, res) => {
          AND o.status IN ('pending', 'paid')`,
       [ticket_type_id]
     );
-
-    if (eventCount.rows[0].sold + quantity > lockedEvent.rows[0].capacity) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ message: 'Not enough event capacity' });
-    }
 
     if (typeCount.rows[0].sold + quantity > ticketType.quantity_available) {
       await client.query('ROLLBACK');
@@ -111,13 +89,12 @@ router.post('/', authenticate, async (req, res) => {
     const membershipResult = await client.query(
       `SELECT EXISTS (
          SELECT 1
-         FROM memberships
-         WHERE user_id = $1
-           AND status = 'active'
-           AND start_date <= CURRENT_DATE
-           AND end_date >= CURRENT_DATE
+         FROM club_members cm
+         JOIN events e ON e.club_id = cm.club_id
+         WHERE e.id = $1 AND cm.user_id = $2
+           AND cm.role IN ('lead', 'admin', 'member')
        ) AS is_member`,
-      [req.user!.id]
+      [eventId, req.user!.id]
     );
 
     const unitPrice = membershipResult.rows[0].is_member
@@ -158,10 +135,29 @@ router.post('/', authenticate, async (req, res) => {
 
     await client.query('COMMIT');
 
+    const receiptPath = `orders/${order.id}/receipt.html`;
+    let receiptStatus = 'unavailable';
+    try {
+      await uploadReceipt(receiptPath, buildReceiptHtml({
+        order,
+        event: eventResult.rows[0],
+        ticketType,
+        tickets,
+      }));
+      await pool.query(
+        'UPDATE ticket_orders SET receipt_path = $1 WHERE id = $2 AND user_id = $3',
+        [receiptPath, order.id, req.user!.id],
+      );
+      receiptStatus = 'stored';
+    } catch (receiptError) {
+      console.error('Failed to store ticket receipt:', receiptError);
+    }
+
     return res.status(201).json({
       message: 'Tickets reserved. Complete payment to confirm your order.',
       order,
       tickets,
+      receipt: { status: receiptStatus },
     });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -177,6 +173,7 @@ router.get('/me', authenticate, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT o.id, o.status, o.total_amount, o.created_at,
+              (o.receipt_path IS NOT NULL) AS receipt_available,
               COUNT(t.id)::int AS ticket_count
        FROM ticket_orders o
        LEFT JOIN tickets t ON t.ticket_order_id = o.id
@@ -197,7 +194,7 @@ router.get('/me', authenticate, async (req, res) => {
 router.get('/:id', authenticate, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT o.id AS order_id, o.status, o.total_amount, o.created_at,
+      `SELECT o.id AS order_id, o.status, o.total_amount, o.created_at, o.receipt_path,
               t.id AS ticket_id, t.ticket_type_id, t.price_paid,
               t.attendee_name, t.ticket_code, t.checked_in_at
        FROM ticket_orders o
@@ -217,6 +214,7 @@ router.get('/:id', authenticate, async (req, res) => {
         status: result.rows[0].status,
         total_amount: result.rows[0].total_amount,
         created_at: result.rows[0].created_at,
+        receipt_available: Boolean(result.rows[0].receipt_path),
       },
       tickets: result.rows
         .filter((row) => row.ticket_id !== null)
@@ -232,6 +230,27 @@ router.get('/:id', authenticate, async (req, res) => {
   } catch (error) {
     console.error(error);
     return res.status(500).json({ message: 'Failed to fetch order' });
+  }
+});
+
+// Generate a short-lived link for the owner's private receipt.
+router.get('/:id/receipt', authenticate, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT receipt_path
+       FROM ticket_orders
+       WHERE id = $1 AND user_id = $2`,
+      [req.params.id, req.user!.id],
+    );
+    if (!result.rowCount) return res.status(404).json({ message: 'Order not found' });
+    if (!result.rows[0].receipt_path) {
+      return res.status(404).json({ message: 'Receipt is not available for this order yet' });
+    }
+    const url = await createReceiptDownloadUrl(result.rows[0].receipt_path);
+    return res.json({ url, expires_in: 3600 });
+  } catch (error) {
+    console.error('Failed to create receipt link:', error);
+    return res.status(503).json({ message: 'Receipt storage is temporarily unavailable' });
   }
 });
 
@@ -265,3 +284,29 @@ router.post('/:id/cancel', authenticate, async (req, res) => {
 });
 
 export default router;
+
+function buildReceiptHtml(input: {
+  order: { id: number; total_amount: number; created_at: string };
+  event: { title: string; starts_at: string; ends_at: string; location?: string; club_name?: string };
+  ticketType: { name: string };
+  tickets: Array<{ ticket_code: string; attendee_name?: string | null; price_paid: number }>;
+}) {
+  const e = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[character] || character));
+  const rows = input.tickets.map((ticket) => `
+    <tr><td>${e(ticket.attendee_name || 'Attendee')}</td><td>${e(ticket.ticket_code)}</td><td>${e(ticket.price_paid)}</td></tr>
+  `).join('');
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Receipt #${e(input.order.id)}</title>
+    <style>body{font-family:Arial,sans-serif;color:#102a43;max-width:760px;margin:40px auto;padding:0 24px}
+    header{border-bottom:3px solid #bce9d7;padding-bottom:20px}h1{margin:0 0 8px}p{color:#52697b}
+    .meta{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:24px 0}
+    .meta div{padding:12px;background:#f4f7f8;border-radius:8px}small{display:block;color:#718394;margin-bottom:5px}
+    table{width:100%;border-collapse:collapse;margin-top:20px}th,td{text-align:left;padding:12px;border-bottom:1px solid #dfe7eb}
+    th{font-size:12px;color:#718394;text-transform:uppercase}.total{text-align:right;font-size:18px;font-weight:bold;margin-top:24px}</style></head>
+    <body><header><h1>Gather ticket receipt</h1><p>Order #${e(input.order.id)} · ${e(input.order.created_at)}</p></header>
+    <h2>${e(input.event.title)}</h2><p>${e(input.event.club_name || 'Independent event')} · ${e(input.event.location || 'Location not provided')}</p>
+    <div class="meta"><div><small>Event starts</small>${e(input.event.starts_at)}</div><div><small>Ticket type</small>${e(input.ticketType.name)}</div></div>
+    <table><thead><tr><th>Attendee</th><th>Ticket code</th><th>Price</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="total">Total: ${e(input.order.total_amount)}</div></body></html>`;
+}

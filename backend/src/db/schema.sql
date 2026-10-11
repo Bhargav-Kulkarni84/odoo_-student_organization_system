@@ -50,7 +50,6 @@ CREATE TABLE events (
     location VARCHAR(255),
     starts_at TIMESTAMPTZ NOT NULL,
     ends_at TIMESTAMPTZ NOT NULL,
-    capacity INTEGER NOT NULL CHECK (capacity > 0),
     status VARCHAR(20) NOT NULL DEFAULT 'draft'
         CHECK (status IN ('draft', 'published', 'cancelled', 'completed')),
     organizer_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
@@ -77,6 +76,7 @@ CREATE TABLE ticket_orders (
     status VARCHAR(20) NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'paid', 'cancelled', 'refunded')),
     total_amount NUMERIC(12,2) NOT NULL CHECK (total_amount >= 0),
+    receipt_path TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

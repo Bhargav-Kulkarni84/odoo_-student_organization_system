@@ -1,5 +1,5 @@
 import pool from '../db/pool.js';
-import { authenticate } from '../middlewares/auth.middlewares.js';
+import { authenticate, optionalAuthenticate } from '../middlewares/auth.middlewares.js';
 import {createTicketTypeSchema,updateTicketTypeSchema} from '../validation/ticket.schema.js';
 import { Router } from 'express';
 
@@ -19,16 +19,29 @@ async function canManageEvent(eventId: string, userId: string, roles: string[]) 
   return Boolean(result.rowCount);
 }
 
-// List ticket types for a published event
-router.get('/', authenticate, async (req, res) => {
+// List ticket types and live availability for a published event.
+router.get('/', optionalAuthenticate, async (req, res) => {
   try {
-    const eventId = req.params.eventId;
-    if (typeof eventId !== 'string') return res.status(400).json({ message: 'Invalid event ID' });
+    const eventId = String((req.params as { eventId?: string }).eventId ?? '');
+    if (!eventId) return res.status(400).json({ message: 'Invalid event ID' });
 
     const result = await pool!.query(
       `SELECT tt.id, tt.event_id, tt.name,
               tt.member_price, tt.non_member_price,
-              tt.quantity_available, tt.sales_start, tt.sales_end
+              tt.quantity_available, tt.sales_start, tt.sales_end,
+              GREATEST(
+                tt.quantity_available - COALESCE((
+                  SELECT COUNT(*) FROM tickets t
+                  JOIN ticket_orders o ON o.id = t.ticket_order_id
+                  WHERE t.ticket_type_id = tt.id
+                    AND o.status IN ('pending', 'paid')
+                ), 0), 0
+              )::int AS remaining
+              , EXISTS (
+                SELECT 1 FROM club_members cm
+                WHERE cm.club_id = e.club_id AND cm.user_id = $2
+                  AND cm.role IN ('lead', 'admin', 'member')
+              ) AS is_member
        FROM ticket_types tt
        JOIN events e ON e.id = tt.event_id
        WHERE e.id = $1 AND (e.status = 'published' OR EXISTS (
@@ -39,6 +52,10 @@ router.get('/', authenticate, async (req, res) => {
        ORDER BY tt.id`,
       [eventId, req.user?.id ?? null]
     );
+
+    if (result.rows.length === 0) {
+      return res.json([]);
+    }
 
     return res.json(result.rows);
   } catch (error) {

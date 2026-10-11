@@ -54,7 +54,7 @@ router.get('/', async (req, res) => {
     try {
         const result = await pool!.query(
             `            SELECT e.id, e.title, e.description, e.location, e.starts_at,
-                   e.ends_at, e.capacity, e.status, e.organizer_id, e.club_id,
+                   e.ends_at, e.status, e.organizer_id, e.club_id,
                    e.created_at, c.name AS club_name
             FROM events e LEFT JOIN clubs c ON c.id = e.club_id
              WHERE e.status = 'published'
@@ -93,7 +93,7 @@ router.get('/managed', authenticate, async (req, res) => {
         const hasGlobalAccess = req.user!.roles.some((role) => ['ADMIN', 'TEAM_LEAD'].includes(role));
         const result = await pool!.query(
             `SELECT e.id, e.title, e.description, e.location, e.starts_at,
-                    e.ends_at, e.capacity, e.status, e.organizer_id, e.club_id,
+                    e.ends_at, e.status, e.organizer_id, e.club_id,
                     e.created_at, c.name AS club_name
              FROM events e
              LEFT JOIN clubs c ON c.id = e.club_id
@@ -134,7 +134,7 @@ router.get('/:id', async (req, res) => {
     try {
         const result = await pool!.query(
             `            SELECT e.id, e.title, e.description, e.location, e.starts_at,
-                   e.ends_at, e.capacity, e.status, e.organizer_id, e.club_id,
+                   e.ends_at, e.status, e.organizer_id, e.club_id,
                    e.created_at, c.name AS club_name
             FROM events e LEFT JOIN clubs c ON c.id = e.club_id
              WHERE e.id = $1 AND e.status = 'published'`,
@@ -181,7 +181,7 @@ router.post('/', authenticate, canManageClubEvents, async (req, res) => {
         });
     }
 
-    const { title, description, location, starts_at, ends_at, capacity, club_id } = validation.data;
+    const { title, description, location, starts_at, ends_at, club_id } = validation.data;
 
     if (!useDatabase()) {
         const event = createFallbackEvent({
@@ -190,7 +190,7 @@ router.post('/', authenticate, canManageClubEvents, async (req, res) => {
             location: location ?? null,
             starts_at,
             ends_at,
-            capacity,
+            capacity: 0,
             organizer_id: Number(req.user?.id ?? 1),
         });
 
@@ -205,8 +205,8 @@ router.post('/', authenticate, canManageClubEvents, async (req, res) => {
         const result = await pool!.query(
             `INSERT INTO events
                 (title, description, location, starts_at, ends_at,
-                 capacity, organizer_id, club_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 organizer_id, club_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              RETURNING *`,
             [
                 title,
@@ -214,7 +214,6 @@ router.post('/', authenticate, canManageClubEvents, async (req, res) => {
                 location ?? null,
                 starts_at,
                 ends_at,
-                capacity,
                 req.user!.id,
                 club_id ?? null,
             ],
@@ -233,7 +232,7 @@ router.post('/', authenticate, canManageClubEvents, async (req, res) => {
                 location: location ?? null,
                 starts_at,
                 ends_at,
-                capacity,
+                capacity: 0,
                 organizer_id: Number(req.user?.id ?? 1),
             });
 
@@ -393,9 +392,30 @@ router.delete('/:id', authenticate, async (req, res) => {
             );
             if (!membership.rowCount) return res.status(403).json({ success: false, message: 'You cannot delete this event' });
         }
+
+        const tickets = await pool!.query(
+            `SELECT COUNT(*)::int AS count
+             FROM tickets t
+             JOIN ticket_types tt ON tt.id = t.ticket_type_id
+             WHERE tt.event_id = $1`,
+            [id],
+        );
+        if (tickets.rows[0].count > 0) {
+            return res.status(409).json({
+                success: false,
+                message: 'This event cannot be deleted because tickets have already been issued. Cancel the event instead to preserve ticket and receipt history.',
+            });
+        }
+
         await pool!.query('DELETE FROM events WHERE id = $1', [id]);
         return res.json({ success: true, message: 'Event deleted successfully' });
     } catch (error) {
+        if ((error as { code?: string }).code === '23503') {
+            return res.status(409).json({
+                success: false,
+                message: 'This event cannot be deleted because it has issued tickets or related financial records. Cancel the event instead to preserve history.',
+            });
+        }
         console.error('Failed to delete event:', error);
         return res.status(500).json({ success: false, message: 'Failed to delete event' });
     }

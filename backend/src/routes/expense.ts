@@ -19,7 +19,17 @@ router.get('/me', authenticate, async (req, res) => {
       [req.user!.id],
     );
 
-    return res.json({ expenses: result.rows });
+    const totalResult = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total_expenses
+       FROM expenses
+       WHERE submitted_by = $1`,
+      [req.user!.id],
+    );
+
+    return res.json({
+      expenses: result.rows,
+      total_expenses: totalResult.rows[0].total_expenses,
+    });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ message: 'Failed to fetch your expenses' });

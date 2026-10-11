@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
-import jwt, { type JwtPayload } from 'jsonwebtoken';
+import jwt from 'jsonwebtoken';
 
 export interface AuthUser {
     id: string;
@@ -28,7 +28,7 @@ export function authenticate(req: Request,res: Response,next: NextFunction) {
     }
 
     const token = authHeader.slice('Bearer '.length);
-    const secret = process.env.JWT_SECRET;
+    const secret = process.env.JWT_SECRET ?? 'student-org-demo-secret';
 
     if (!secret) {
         console.error('JWT_SECRET is not configured');
@@ -65,6 +65,20 @@ export function authenticate(req: Request,res: Response,next: NextFunction) {
             message: 'Invalid or expired authentication token',
         });
     }
+}
+
+export function optionalAuthenticate(req: Request, _res: Response, next: NextFunction) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) return next();
+    try {
+        const decoded = jwt.verify(authHeader.slice('Bearer '.length), process.env.JWT_SECRET ?? 'student-org-demo-secret');
+        if (typeof decoded !== 'string' && decoded.sub && typeof decoded.email === 'string' && Array.isArray(decoded.roles)) {
+            req.user = { id: decoded.sub, email: decoded.email, roles: decoded.roles.filter((role): role is string => typeof role === 'string') };
+        }
+    } catch {
+        // Public event details remain available when an expired token is present.
+    }
+    return next();
 }
 
 // Check the user roles authorization

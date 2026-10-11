@@ -2,9 +2,9 @@ import { z } from 'zod';
 
 const ticketTypeBase = z.object({
   name: z.string().trim().min(1).max(100),
-  member_price: z.number().nonnegative(),
-  non_member_price: z.number().nonnegative(),
-  quantity_available: z.number().int().nonnegative(),
+  member_price: z.coerce.number().nonnegative(),
+  non_member_price: z.coerce.number().nonnegative(),
+  quantity_available: z.coerce.number().int().nonnegative(),
   sales_start: z.iso.datetime({ offset: true }).nullable().optional(),
   sales_end: z.iso.datetime({ offset: true }).nullable().optional(),
 });
